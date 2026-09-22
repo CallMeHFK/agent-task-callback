@@ -23,10 +23,11 @@ jobs:
       - name: Assert the host really is absent
         run: |
           set -euo pipefail
-          uv run python -c "import importlib.util, sys
-          sys.exit(0 if importlib.util.find_spec('qwenpaw') is None else 1)"
+          uv run python -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('qwenpaw') is None else 1)"
       - name: Confirm the suite runs against the host stub
-        run: uv run python tests/test_zombie_watcher.py 2>&1 | grep -q "host: stubbed"
+        run: |
+          set -euo pipefail
+          uv run python tests/test_zombie_watcher.py 2>&1 | grep -q 'host: stubbed'
       # The release asset is built here too, so an INCLUDE list that drifted
       # (a renamed backend file, a stray symlink) fails CI rather than the
       # install of whoever downloads the release.
