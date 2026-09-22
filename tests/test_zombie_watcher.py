@@ -1,4 +1,5 @@
-"""Regression tests for the agent-task-callback zombie-watcher bug (0.1.2).
+"""Watcher regression tests: vanished tasks, the strike cap, delivery text,
+restart re-arming, and the identity a poll is issued under.
 
 Run: python3 tests/test_zombie_watcher.py   # or `uv run python -m pytest -q`
 """
@@ -296,6 +297,69 @@ class TestBootRearm(unittest.TestCase):
             {"task_id": "f", "status": "pending", "registered_at": old},
         ])
         self.assertEqual(got, [])
+
+
+class _FakeAgentContext:
+    """Shadow the request-scoped context the registering tool reads its own
+    identity from, which only exists inside a live app turn."""
+
+    def install(self):
+        names = ("qwenpaw.app", "qwenpaw.app.agent_context")
+        self.saved = {n: sys.modules.get(n) for n in names}
+        app = types.ModuleType("qwenpaw.app")
+        app.__path__ = []
+        ctx = types.ModuleType("qwenpaw.app.agent_context")
+        ctx.get_current_agent_id = lambda: "default"
+        ctx.get_current_session_id = lambda: "s-parent"
+        ctx.get_current_user_id = lambda: "u-1"
+        ctx.get_current_channel = lambda: "console"
+        app.agent_context = ctx
+        sys.modules["qwenpaw.app"] = app
+        sys.modules["qwenpaw.app.agent_context"] = ctx
+
+    def uninstall(self):
+        for name, module in self.saved.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+
+
+class TestTargetAgentIdentity(Base):
+    """A background task belongs to the agent that ran it, and the framework's
+    own check_agent_task polls as that agent. Polling as the submitting agent
+    instead eventually reads as MAX_STRIKES failed checks and the job goes
+    `abandoned` -- so the registered tool has to be able to carry the target."""
+
+    def _register(self, *args, **kwargs):
+        saved = (atc._IMPL, atc._load_state, atc._save_state)
+        store = {"jobs": []}
+        atc._IMPL = self.plug
+        atc._load_state = lambda: store
+        atc._save_state = lambda state: store.update(state)
+        self.plug._spawn = lambda job: None
+        fake = _FakeAgentContext()
+        fake.install()
+        try:
+            out = atc.watch_agent_task(*args, **kwargs)
+        finally:
+            fake.uninstall()
+            atc._IMPL, atc._load_state, atc._save_state = saved
+        return out, store["jobs"][0]
+
+    def test_named_target_agent_reaches_the_job(self):
+        out, job = self._register("t1", target_agent="SE")
+        self.assertTrue(out.startswith("Watching task t1"), out)
+        self.assertEqual(job["target_agent"], "SE")
+
+    def test_polling_asks_as_the_target_agent(self):
+        _, job = self._register("t1", target_agent="SE")
+        self.assertEqual(self.plug._query_headers(job)["X-Agent-Id"], "SE")
+
+    def test_target_agent_stays_optional(self):
+        _, job = self._register("t1")
+        self.assertIsNone(job["target_agent"])
+        self.assertEqual(self.plug._query_headers(job)["X-Agent-Id"], "default")
 
 
 if __name__ == "__main__":

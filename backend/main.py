@@ -67,11 +67,20 @@ def _save_state(state: dict) -> None:
 _IMPL = None
 
 
-def watch_agent_task(task_id: str) -> str:
-    """Watch an inter-agent background task id and resume this session on completion."""
+def watch_agent_task(task_id: str, target_agent: str = "") -> str:
+    """Watch an inter-agent background task id and resume this session on completion.
+
+    Args:
+        task_id (`str`):
+            The id returned by ``submit_to_agent``.
+        target_agent (`str`, optional):
+            The agent the task was submitted to. The watcher polls with that
+            identity, exactly as ``check_agent_task`` does; omit it only when
+            the task runs in this same agent.
+    """
     if _IMPL is None:
         return "ERROR: plugin not initialised"
-    return _IMPL.watch_agent_task(task_id)
+    return _IMPL.watch_agent_task(task_id, target_agent)
 
 
 def callback_task_status() -> str:
@@ -169,7 +178,9 @@ class AgentTaskCallbackPlugin:
                 "automatically sent back to the current session as a new "
                 "user turn, so the parent agent resumes without polling. "
                 "Context (agent/session/user/channel) is captured "
-                "automatically."
+                "automatically. Pass target_agent — the agent the task was "
+                "submitted to — so the watcher polls under that identity, the "
+                "way check_agent_task does."
             ),
             icon="\u23f3",
             tool_type="network",
@@ -307,11 +318,14 @@ class AgentTaskCallbackPlugin:
         return headers
 
     def _query_headers(self, job: dict) -> dict:
-        """The task lives in the child agent's namespace, so query as it.
+        """Poll as the agent ``check_agent_task`` would: the target when the
+        caller named one, else this one.
 
         ``submit_to_agent`` forwards the request under the *target* agent
-        identity; polling with any other identity yields a non-JSON error
-        page ("Expecting value: line 1 column 1").
+        identity and the framework's own poller passes that same id, so
+        matching it keeps the watcher correct if task storage ever becomes
+        per-agent. On 2.2.1 the store is one global dict, which is why
+        watching has worked without naming the target.
         """
         return self._headers(job.get("target_agent") or job.get("agent_id"))
 
@@ -482,6 +496,9 @@ class AgentTaskCallbackPlugin:
         you want to be resumed on. It records the current agent, session,
         user and channel, then polls until the task reaches a terminal
         state and re-injects the result into this same session.
+
+        ``target_agent`` names the agent the task was submitted to, which is
+        the identity the poll is issued under; empty means poll as this agent.
         """
         from qwenpaw.app.agent_context import (
             get_current_agent_id,
