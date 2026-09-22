@@ -9,7 +9,7 @@ on:
       - "v*"
 
 jobs:
-  plugin-bundle:
+  release-assets:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -24,23 +24,59 @@ jobs:
           set -euo pipefail
           zip=$(python3 packaging/build_plugin_zip.py)
           echo "zip=$zip" >> "$GITHUB_OUTPUT"
+      # GitHub already offers its own "Source code (zip)" link for every tag.
+      # This asset exists to name the source explicitly next to the bundle, so
+      # `gh release download` and the asset list say which file is which.
+      - name: Build the source archive
+        id: source
+        run: |
+          set -euo pipefail
+          # A refname may contain `/`, which would turn the asset path into a
+          # directory that does not exist.
+          ref=$(printf '%s' "$GITHUB_REF_NAME" | tr -d '/')
+          archive="dist/agent-task-callback-$ref-source.zip"
+          git archive --format=zip --prefix="agent-task-callback-$ref/" \
+            -o "$archive" "HEAD"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
       # Everything interpolated from the event or a step output reaches the
       # shell as an environment variable, never as script text: a tag name is a
       # refname, and refnames allow backquotes and `$`.
-      - name: Attach it to the release
+      - name: Attach them to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ZIP: ${{ steps.bundle.outputs.zip }}
+          ARCHIVE: ${{ steps.source.outputs.archive }}
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
+          cat >notes.md <<'NOTES'
+          ## Which file to download
+
+          - **`agent-task-callback-qwenpaw-plugin-<version>.zip`** — the plugin
+            bundle. Install this one: the QwenPaw plugin screen takes it as an
+            upload or a URL, and `qwenpaw plugin install <path|url>` does the
+            same. A running app hot-loads the plugin and runs its startup hook, so
+            no restart is needed (unpacking into `~/.qwenpaw/plugins/` by hand
+            does need one).
+          - **`agent-task-callback-<tag>-source.zip`** — the tagged tree
+            (backend, tests, packaging, CI), for reading and developing. Do not
+            install it: it carries `plugin.json` too, so QwenPaw accepts it and
+            drops `tests/`, `packaging/` and `.github/` into
+            `~/.qwenpaw/plugins/` alongside the files it actually loads.
+
+          Requires QwenPaw 2.2.0–2.3.0. Installing writes each tool into every
+          agent's config as `enabled: false`, so see the README for the one-time
+          per-agent step that actually enables them.
+          NOTES
           if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" --title "$tag" \
-              --notes "Built from the $tag tag. The attached zip is the QwenPaw plugin bundle: install it from the QwenPaw plugin screen, then restart the app for the boot hook to pick it up."
+            gh release create "$tag" --title "$tag" --notes-file notes.md
           fi
-          gh release upload "$tag" "$ZIP" --clobber
-      - name: Asset URL
+          gh release upload "$tag" "$ZIP" "$ARCHIVE" --clobber
+      - name: Asset URLs
         env:
           ZIP: ${{ steps.bundle.outputs.zip }}
+          ARCHIVE: ${{ steps.source.outputs.archive }}
           REPO: ${{ github.repository }}
-        run: echo "https://github.com/$REPO/releases/download/$GITHUB_REF_NAME/$(basename "$ZIP")"
+        run: |
+          echo "https://github.com/$REPO/releases/download/$GITHUB_REF_NAME/$(basename "$ZIP")"
+          echo "https://github.com/$REPO/releases/download/$GITHUB_REF_NAME/$(basename "$ARCHIVE")"
