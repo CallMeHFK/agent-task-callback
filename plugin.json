@@ -1,0 +1,33 @@
+{
+  "id": "agent-task-callback",
+  "name": "Agent Task Callback",
+  "version": "0.1.2",
+  "description": "Opt-in persistent watcher for inter-agent background tasks; resumes the registering console session on completion.",
+  "author": "Local workspace",
+  "type": "tool",
+  "entry": {
+    "backend": "backend/main.py"
+  },
+  "qwenpaw_version": {
+    "min": "2.2.0",
+    "max": "2.3.0"
+  },
+  "permissions": [],
+  "settings": {},
+  "meta": {
+    "tools": [
+      {
+        "name": "watch_agent_task",
+        "description": "Watch a submitted task and resume this session on completion"
+      },
+      {
+        "name": "callback_task_status",
+        "description": "Inspect this session's callback jobs"
+      },
+      {
+        "name": "cancel_task_callback",
+        "description": "Cancel a pending callback (not the child task)"
+      }
+    ]
+  }
+}
