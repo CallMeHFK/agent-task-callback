@@ -129,15 +129,27 @@ Every branch is normalized to keep the required `/api` suffix.
 
 ## Development
 
-`backend/main.py` is a single self-contained module. It compiles under
-Python 3.12 and its URL-resolution and watcher-lifecycle behaviour are covered
-by isolated unit tests: `python3 tests/test_zombie_watcher.py`.
+`backend/main.py` is a single self-contained module. There is no package to
+install: QwenPaw loads that file by path from `~/.qwenpaw/plugins/`.
+
+The test suite runs without QwenPaw installed -- `backend/main.py` imports the
+host at module scope, so the tests stand in for the one name they need:
+
+```bash
+uv sync
+uv run python -m pytest -q
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the edit → install → restart loop,
+why a second copy of the plugin directory must not sit in `plugins/`, and the
+framework behaviours the watcher depends on. Release tags (`v*`) build the
+installable zip via `packaging/build_plugin_zip.py`.
 
 When changing code, do all three or the change will not take effect:
 
-1. edit the dev source tree,
+1. edit this repository,
 2. copy it over `~/.qwenpaw/plugins/agent-task-callback/`,
-3. bump `version` in `plugin.json` and reload.
+3. bump `version` in `plugin.json` and restart the app.
 
 ## Changelog
 

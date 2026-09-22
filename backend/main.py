@@ -7,16 +7,14 @@ Full lifecycle traceability (kept verbatim from the prior conversation):
 
 from __future__ import annotations
 
-import asyncio
 import json
 import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import httpx
-
 from qwenpaw.plugins.api import PluginApi
 
 try:
@@ -162,7 +160,7 @@ class AgentTaskCallbackPlugin:
     """Watches submitted agent tasks and re-injects results into the origin session."""
 
     def __init__(self) -> None:
-        self._watchers: dict[str, "_WatcherThread"] = {}
+        self._watchers: dict[str, _WatcherThread] = {}
         self._shutdown = False
 
     # ---- registration ---------------------------------------------------
@@ -265,7 +263,7 @@ class AgentTaskCallbackPlugin:
         return state
 
     @staticmethod
-    def _get_job(task_id: str) -> Optional[dict]:
+    def _get_job(task_id: str) -> dict | None:
         return next(
             (j for j in _load_state().get("jobs", []) if j.get("task_id") == task_id),
             None,
@@ -294,7 +292,7 @@ class AgentTaskCallbackPlugin:
             resolved = _normalize_api_base_url(None)
             if resolved and resolved.strip():
                 return normalize(resolved)
-        except Exception:  # noqa: BLE001 - framework unavailable: use fallback
+        except Exception:  # framework unavailable: fall back to env/port
             logger.debug("framework API resolver unavailable", exc_info=True)
 
         explicit = os.environ.get("QWENPAW_RUNTIME_API_URL", "").strip()
@@ -304,7 +302,7 @@ class AgentTaskCallbackPlugin:
         port = os.environ.get("QWENPAW_RUNTIME_PORT", "").strip() or "19999"
         return normalize(f"http://{host}:{port}")
 
-    def _headers(self, agent_id: Optional[str] = None) -> dict:
+    def _headers(self, agent_id: str | None = None) -> dict:
         import os
 
         token = os.environ.get("QWENPAW_RUNTIME_INTERNAL_TOKEN", "")
@@ -394,10 +392,17 @@ class AgentTaskCallbackPlugin:
             )
 
             return format_background_status_text(task_id, data)[:MAX_DELIVERY_CHARS]
-        except Exception:  # noqa: BLE001 - helper moved or renamed
+        except Exception:  # helper moved or renamed: use the local extractor
             logger.debug("framework formatter unavailable", exc_info=True)
 
-        blocks = ((data.get("result") or {}).get("output") or [{}])[-1]
+        # Fallback mirrors the framework's two decisions: the reply is the text
+        # of the LAST output item, and a failed task is reported as a failure
+        # even though the outer status is "finished" either way.
+        inner = data.get("result") or {}
+        error = (inner.get("error") or {}).get("message")
+        if inner.get("status") == "failed" and error:
+            return f"Task failed.\n\nError: {error}"[:MAX_DELIVERY_CHARS]
+        blocks = (inner.get("output") or [{}])[-1]
         text = "\n".join(
             item.get("text", "")
             for item in (blocks.get("content") or [])
@@ -405,7 +410,7 @@ class AgentTaskCallbackPlugin:
         ).strip()
         return text[:MAX_DELIVERY_CHARS]
 
-    def _watch_sync(self, job: dict, stop: "threading.Event") -> None:
+    def _watch_sync(self, job: dict, stop: threading.Event) -> None:
         task_id = job["task_id"]
         terminal = {"finished", "failed", "cancelled", "timeout", "error"}
         result = None

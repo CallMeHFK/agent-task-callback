@@ -1,0 +1,46 @@
+name: release
+
+# The plugin bundle is a release asset, not a package artifact: QwenPaw installs
+# it from the release's zip URL, so the file has to be there by the time anyone
+# reads the release page.
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  plugin-bundle:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      # Stdlib only (json + zipfile), so this needs no dependency sync. The
+      # assignment is checked separately because `set -e` does not see a failure
+      # hidden inside an echo's command substitution.
+      - name: Build the QwenPaw plugin zip
+        id: bundle
+        run: |
+          set -euo pipefail
+          zip=$(python3 packaging/build_plugin_zip.py)
+          echo "zip=$zip" >> "$GITHUB_OUTPUT"
+      # Everything interpolated from the event or a step output reaches the
+      # shell as an environment variable, never as script text: a tag name is a
+      # refname, and refnames allow backquotes and `$`.
+      - name: Attach it to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ZIP: ${{ steps.bundle.outputs.zip }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --title "$tag" \
+              --notes "Built from the $tag tag. The attached zip is the QwenPaw plugin bundle: install it from the QwenPaw plugin screen, then restart the app for the boot hook to pick it up."
+          fi
+          gh release upload "$tag" "$ZIP" --clobber
+      - name: Asset URL
+        env:
+          ZIP: ${{ steps.bundle.outputs.zip }}
+          REPO: ${{ github.repository }}
+        run: echo "https://github.com/$REPO/releases/download/$GITHUB_REF_NAME/$(basename "$ZIP")"

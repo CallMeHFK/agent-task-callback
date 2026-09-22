@@ -1,2 +1,30 @@
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# Environments
+.venv/
+.env
+
+# Build artifacts
+dist/
+build/
+uv.lock
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+
+# Qoder agent worktrees (tool state, never part of the project)
+.qoder/
+
+# Local QwenPaw runtime state -- session ids and delivered results, never commit
+agent-task-callback.json

@@ -8,12 +8,39 @@ import importlib.util
 import sys
 import threading
 import time
+import types
 import unittest
 from pathlib import Path
 
 import httpx
 
 SRC = str(Path(__file__).resolve().parent.parent / "backend" / "main.py")
+
+# backend/main.py imports the host app at module scope, and QwenPaw is not on
+# PyPI. Without the host the test stands in for the one name it needs, so the
+# suite runs anywhere; with it, nothing is replaced.
+try:
+    import qwenpaw.plugins.api  # noqa: F401
+
+    HOST_STUBBED = False
+except ImportError:
+    HOST_STUBBED = True
+    _qwenpaw = types.ModuleType("qwenpaw")
+    _qwenpaw.__path__ = []
+    _plugins = types.ModuleType("qwenpaw.plugins")
+    _plugins.__path__ = []
+    _api = types.ModuleType("qwenpaw.plugins.api")
+
+    class PluginApi:
+        pass
+
+    _api.PluginApi = PluginApi
+    _qwenpaw.plugins = _plugins
+    _plugins.api = _api
+    sys.modules.setdefault("qwenpaw", _qwenpaw)
+    sys.modules["qwenpaw.plugins"] = _plugins
+    sys.modules["qwenpaw.plugins.api"] = _api
+
 spec = importlib.util.spec_from_file_location("atc", SRC)
 atc = importlib.util.module_from_spec(spec)
 sys.modules["atc"] = atc
@@ -272,4 +299,6 @@ class TestBootRearm(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    print("QwenPaw host:", "stubbed (delivery-text fallback)" if HOST_STUBBED
+          else "real (delivery-text uses format_background_status_text)")
     unittest.main(verbosity=2)

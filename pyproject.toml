@@ -1,0 +1,30 @@
+[project]
+name = "agent-task-callback"
+version = "0.1.2"
+description = "QwenPaw plugin: opt-in persistent watcher that resumes the registering console session when an inter-agent background task finishes."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "CallMeHFK" }]
+keywords = ["qwenpaw", "plugin", "background-tasks", "agent"]
+dependencies = [
+  "httpx>=0.27",
+]
+
+# The plugin is not an importable Python package -- QwenPaw loads backend/main.py
+# by path from ~/.qwenpaw/plugins/. Declaring the project unbuilt keeps `uv sync`
+# from trying to build a wheel out of a plugin bundle, while still installing the
+# runtime and dev dependencies above.
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["dist"]

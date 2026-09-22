@@ -1,0 +1,38 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --all-extras
+      # `python -m pytest`, not a bare `pytest`: a bare pytest can resolve
+      # outside this environment and import a stale installed copy, reporting
+      # green against code that is no longer on disk.
+      - run: uv run python -m pytest -q
+      - run: uv run ruff check .
+      # QwenPaw is not on PyPI, so CI is exactly the case the test suite's host
+      # stub exists for. Assert the assumption holds: if a future image ships
+      # with the app importable, the suite would silently switch to the other
+      # delivery-text branch.
+      - name: Assert the host really is absent
+        run: |
+          set -euo pipefail
+          uv run python -c "import importlib.util, sys
+          sys.exit(0 if importlib.util.find_spec('qwenpaw') is None else 1)"
+      - name: Confirm the suite runs against the host stub
+        run: uv run python tests/test_zombie_watcher.py 2>&1 | grep -q "host: stubbed"
+      # The release asset is built here too, so an INCLUDE list that drifted
+      # (a renamed backend file, a stray symlink) fails CI rather than the
+      # install of whoever downloads the release.
+      - name: Build the plugin bundle
+        run: uv run python packaging/build_plugin_zip.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-bundle
+          path: dist/*.zip
