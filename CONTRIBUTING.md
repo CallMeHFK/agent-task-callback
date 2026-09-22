@@ -36,9 +36,14 @@ mode it resolved to:
 
 ```bash
 uv sync
-uv run python -m pytest -q     # prints "QwenPaw host: stubbed (...)"
-python3 tests/test_zombie_watcher.py   # same suite, no pytest needed
+uv run python -m pytest -q             # 13 tests
+uv run ruff check .
+python3 tests/test_zombie_watcher.py   # same suite, and prints the host mode
 ```
+
+`pytest -q` captures the host line; the direct run shows it
+(`QwenPaw host: stubbed (…)` / `real (…)`), which is the one thing worth knowing
+about a local result.
 
 Both branches of the delivery-text path are real code and both are covered:
 against a live app it defers to the framework's `format_background_status_text`;
@@ -66,8 +71,19 @@ session, so a test run cannot deliver a message into a live chat.
 
 ## Release
 
-Tag `v*` and the release workflow attaches the installable zip. To check the
-bundle locally:
+Tag `v*` and the release workflow attaches two assets: the installable plugin
+zip and a `-source.zip` of the tagged tree (`git archive`, so tracked files only
+and no `dist/`). GitHub generates its own "Source code" link for every tag
+anyway; the explicit asset exists so the release page and `gh release download`
+name the two kinds of archive unambiguously. Both carry `plugin.json`, so both
+*can* be installed — only the `-qwenpaw-plugin-` one should be, because the
+source tree also drags `tests/`, `packaging/` and `.github/` into
+`~/.qwenpaw/plugins/`.
+
+Bump `version` in `plugin.json` **before** tagging: it is both the asset name and
+what `GET /api/plugins/<id>/status` reports, and the tag is only a tag.
+
+To check the bundle locally:
 
 ```bash
 python3 packaging/build_plugin_zip.py
