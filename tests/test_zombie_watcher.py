@@ -1,6 +1,6 @@
-"""Failing tests for the agent-task-callback zombie-watcher bug (report 2026-09-22).
+"""Regression tests for the agent-task-callback zombie-watcher bug (0.1.2).
 
-Run: python3 /tmp/test_atc_zombie.py
+Run: python3 tests/test_zombie_watcher.py   # or `uv run python -m pytest -q`
 """
 import asyncio
 import builtins

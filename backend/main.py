@@ -1,9 +1,4 @@
-"""Agent Task Callback — opt-in watcher that resumes the registering session.
-
-Full lifecycle traceability (kept verbatim from the prior conversation):
-  parent check token PARENT-5027570671
-  child  check token CHILD-5027570671
-"""
+"""Agent Task Callback — opt-in watcher that resumes the registering session."""
 
 from __future__ import annotations
 
