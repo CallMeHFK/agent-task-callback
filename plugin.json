@@ -1,7 +1,7 @@
 {
   "id": "agent-task-callback",
   "name": "Agent Task Callback",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Opt-in persistent watcher for inter-agent background tasks; resumes the registering console session on completion.",
   "author": "Local workspace",
   "type": "tool",
@@ -18,7 +18,7 @@
     "tools": [
       {
         "name": "watch_agent_task",
-        "description": "Watch a submitted task and resume this session on completion"
+        "description": "Watch a submitted task, on this agent or another, and resume this session on completion"
       },
       {
         "name": "callback_task_status",

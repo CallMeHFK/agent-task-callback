@@ -62,14 +62,14 @@ copy-it-myself route does.
 
   ```bash
   qwenpaw plugin install \
-    https://github.com/CallMeHFK/agent-task-callback/releases/latest/download/agent-task-callback-qwenpaw-plugin-0.1.2.zip
+    https://github.com/CallMeHFK/agent-task-callback/releases/latest/download/agent-task-callback-qwenpaw-plugin-0.1.3.zip
   ```
 
 - **By hand** — unpack into `~/.qwenpaw/plugins/` (the archive already contains
   an `agent-task-callback/` directory) and *then* restart the app:
 
   ```bash
-  unzip -o agent-task-callback-qwenpaw-plugin-0.1.2.zip -d ~/.qwenpaw/plugins/
+  unzip -o agent-task-callback-qwenpaw-plugin-0.1.3.zip -d ~/.qwenpaw/plugins/
   ```
 
   Do not leave a second copy under `~/.qwenpaw/plugins/` — every immediate
@@ -101,7 +101,7 @@ Agents created afterwards start disabled too and need the same flip.
 
 ```bash
 curl -sS http://127.0.0.1:19999/api/plugins/agent-task-callback/status
-# {"id":"agent-task-callback","loaded":true,"enabled":true,"version":"0.1.2"}
+# {"id":"agent-task-callback","loaded":true,"enabled":true,"version":"0.1.3"}
 
 python3 - <<'PY'
 import json, pathlib
@@ -120,7 +120,7 @@ successfully` on every load.
 
 | Tool | Signature | Does |
 | --- | --- | --- |
-| `watch_agent_task` | `(task_id)` | Watch a task returned by `submit_to_agent`; deliver its result back to this session when it ends |
+| `watch_agent_task` | `(task_id, target_agent="")` | Watch a task returned by `submit_to_agent`; deliver its result back to this session when it ends. Pass `target_agent` when the task runs on another agent |
 | `callback_task_status` | `()` | List the last 20 jobs: `task_id \| status \| agent=… session=… \| registered=…` |
 | `cancel_task_callback` | `(task_id)` | Stop *this plugin's watcher* — the child task keeps running |
 
@@ -131,8 +131,9 @@ ping me when it lands") works too:
 ```text
 > have the SE agent audit the driver stack and report back
 
-  submit_to_agent(...)                  -> task_id 0f9c1a…
-  watch_agent_task("0f9c1a…")           -> Watching task 0f9c1a… for agent 'default'.
+  submit_to_agent(..., to_agent="SE")   -> task_id 0f9c1a…
+  watch_agent_task("0f9c1a…", target_agent="SE")
+                                        -> Watching task 0f9c1a… for agent 'default'.
                                            Result will be posted back to session s-77…
   … the session finishes its turn, goes idle …
 
@@ -226,9 +227,11 @@ it unredacted.
 - The result arrives as a **user** turn on the channel recorded at registration
   time (`console` when the framework reports none), so it follows whatever
   routing that channel has.
-- `watch_agent_task` takes only `task_id`. `target_agent` exists on the internal
-  implementation but is not exposed by the registered tool; identity is carried
-  by the request path and headers.
+- Pass `target_agent` when you delegate to another agent. Leaving it out still
+  works on 2.2.1 — the framework keeps background tasks in one global dict, so
+  `X-Agent-Id` is not what gates the lookup today — but it is the wrong identity
+  relative to `check_agent_task`, and a per-agent store would turn that into 90
+  failed checks and an `abandoned` job.
 - Jobs older than 24 h are dropped at startup rather than re-armed — their task
   record has almost certainly gone.
 - The restart path is verified by invoking `_boot` directly in tests; it has not
@@ -263,6 +266,14 @@ the framework behaviours the watcher depends on.
 
 ## Changelog
 
+- **0.1.3** — `watch_agent_task` now accepts `target_agent`. The parameter
+  existed on the internal implementation but the registered tool could not pass
+  it, so every poll went out under the *registering* agent's identity while the
+  framework's own `check_agent_task` polls as the target. Harmless on 2.2.1,
+  where the task store is one global dict; under a per-agent store it would
+  have cost every cross-agent watcher 90 failed checks and an `abandoned` job.
+  The tool description now names the argument, and `_query_headers` documents
+  why the identity is mirrored rather than required.
 - **0.1.2** — Stop the zombie-watcher log flood. `_watch_sync` treated every
   exception as retryable, so a task id that 404s (record lost in a restart) was
   polled forever at `POLL_SECONDS`: 520 warnings/hour across 3 jobs in the

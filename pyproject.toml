@@ -1,6 +1,6 @@
 [project]
 name = "agent-task-callback"
-version = "0.1.2"
+version = "0.1.3"
 description = "QwenPaw plugin: opt-in persistent watcher that resumes the registering console session when an inter-agent background task finishes."
 readme = "README.md"
 license = "MIT"

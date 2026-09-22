@@ -81,7 +81,8 @@ source tree also drags `tests/`, `packaging/` and `.github/` into
 `~/.qwenpaw/plugins/`.
 
 Bump `version` in `plugin.json` **before** tagging: it is both the asset name and
-what `GET /api/plugins/<id>/status` reports, and the tag is only a tag.
+what `GET /api/plugins/<id>/status` reports, and the tag is only a tag. Move
+`pyproject.toml` with it, and the version inside the README's install commands.
 
 To check the bundle locally:
 
