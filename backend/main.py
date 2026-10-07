@@ -34,6 +34,16 @@ MAX_STRIKES = 90
 MAX_JOB_AGE = 24 * 3600
 MAX_DELIVERY_CHARS = 8000
 
+# Terminal jobs are kept for inspection via callback_task_status, then pruned so
+# the state file cannot grow without bound over months of use.
+TERMINAL_STATUSES = {"done", "unconfirmed", "cancelled", "lost", "abandoned",
+                     "error", "expired"}
+TERMINAL_JOB_KEEP = 7 * 24 * 3600
+
+# Guards the load-modify-save sequences against watcher threads finishing at
+# the same moment and clobbering each other's updates.
+_STATE_LOCK = threading.Lock()
+
 
 def _is_gone(exc: BaseException) -> bool:
     """Did this error mean the task record can never come back?
@@ -55,6 +65,14 @@ def _load_state() -> dict:
 
 
 def _save_state(state: dict) -> None:
+    now = time.time()
+    state["jobs"] = [
+        job
+        for job in state.get("jobs", [])
+        if job.get("status") not in TERMINAL_STATUSES
+        or now - job.get("completed_at", job.get("registered_at", 0))
+        <= TERMINAL_JOB_KEEP
+    ]
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = STATE_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
@@ -147,17 +165,24 @@ class _WatcherThread(threading.Thread):
     def __init__(self, job: dict) -> None:
         super().__init__(name=f"agent-task-callback-{job['task_id']}")
         self._job = job
-        self._stop = threading.Event()
+        # Not ``_stop``: Thread reserves that name for join() bookkeeping.
+        self._stop_event = threading.Event()
         self._impl = _IMPL
+
+    def matches(self, job: dict) -> bool:
+        """Same delivery target? A re-registration from another session must
+        replace this watcher, not be silently absorbed by it."""
+        keys = ("session_id", "user_id", "channel", "agent_id", "target_agent")
+        return all(self._job.get(k) == job.get(k) for k in keys)
 
     def run(self) -> None:
         impl = self._impl or _IMPL
         if impl is None:
             return
-        impl._watch_sync(self._job, self._stop)
+        impl._watch_sync(self._job, self._stop_event)
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
 
 class AgentTaskCallbackPlugin:
@@ -235,6 +260,16 @@ class AgentTaskCallbackPlugin:
             for job in pending
             if now - job.get("registered_at", 0) <= MAX_JOB_AGE
         ]
+        # Stale pendings can never be re-armed, so leaving them "pending"
+        # forever would misreport them in callback_task_status.
+        for job in pending:
+            if job not in fresh:
+                self._update_job(
+                    job["task_id"],
+                    status="expired",
+                    completed_at=now,
+                    note="pending past MAX_JOB_AGE at boot; not re-armed",
+                )
         for job in fresh:
             self._spawn(job)
         logger.info(
@@ -244,29 +279,52 @@ class AgentTaskCallbackPlugin:
 
     async def _halt(self) -> None:
         self._shutdown = True
-        for thread in list(self._watchers.values()):
+        watchers = list(self._watchers.values())
+        for thread in watchers:
             thread.stop()
+        for thread in watchers:
+            thread.join(timeout=2)
         self._watchers.clear()
 
     # ---- internals ------------------------------------------------------
     def _spawn(self, job: dict) -> None:
         task_id = job["task_id"]
+        self._watchers = {
+            tid: t for tid, t in self._watchers.items() if t.is_alive()
+        }
         existing = self._watchers.get(task_id)
-        if existing is not None and existing.is_alive():
-            return  # idempotent: never double-watch the same task
+        if existing is not None:
+            if existing.matches(job):
+                return  # idempotent: never double-watch the same task
+            existing.stop()  # re-registered with a new target: the new job wins
         thread = _WatcherThread(job)
         self._watchers[task_id] = thread
         thread.start()
 
     @staticmethod
-    def _update_job(task_id: str, **fields: Any) -> dict:
-        state = _load_state()
-        for job in state.get("jobs", []):
-            if job.get("task_id") == task_id:
-                job.update(fields)
-                break
-        _save_state(state)
-        return state
+    def _update_job(task_id: str, expected_job: dict | None = None,
+                    **fields: Any) -> bool:
+        """Apply ``fields`` to the stored job; True when the write landed.
+
+        With ``expected_job`` the write lands only while the stored job is
+        still that exact pending registration, so a watcher's terminal write
+        can never clobber a cancel or a re-registration that beat it.
+        """
+        with _STATE_LOCK:
+            state = _load_state()
+            updated = False
+            for job in state.get("jobs", []):
+                if job.get("task_id") == task_id:
+                    if expected_job is None or (
+                        job.get("job_id") == expected_job.get("job_id")
+                        and job.get("status") == "pending"
+                    ):
+                        job.update(fields)
+                        updated = True
+                    break
+            if updated:
+                _save_state(state)
+            return updated
 
     @staticmethod
     def _get_job(task_id: str) -> dict | None:
@@ -336,16 +394,22 @@ class AgentTaskCallbackPlugin:
             headers=self._query_headers(job),
             timeout=HTTP_TIMEOUT,
         )
-        resp.raise_for_status()
+        # Content-type first: a wrong base URL can answer 404 with an HTML
+        # error page, and checking the status before the type would read that
+        # as "the task record is gone" and park the job as lost.
         ctype = resp.headers.get("content-type", "")
         if "json" not in ctype.lower():
             raise ValueError(
                 f"non-JSON response from {resp.url} (content-type={ctype!r}); "
                 "the API base URL is probably wrong"
             )
+        resp.raise_for_status()
         return resp.json()
 
-    def _post_reply_sync(self, job: dict, text: str) -> bool:
+    def _post_reply_sync(self, job: dict, text: str,
+                         stop: threading.Event) -> bool | None:
+        """True = delivered, False = attempted and failed, None = stopped
+        before any attempt whose outcome the caller must not guess at."""
         payload = {
             "session_id": job["session_id"],
             "user_id": job["user_id"],
@@ -356,9 +420,14 @@ class AgentTaskCallbackPlugin:
             ],
         }
         # A 409 means the parent session is still mid-turn; that is a
-        # "not yet" rather than a failure, so back off and retry.
+        # "not yet" rather than a failure, so back off and retry. The stop
+        # event is honoured between attempts so a cancel or shutdown during
+        # the backoff does not deliver anyway.
         max_attempts = 30
         for attempt in range(max_attempts):
+            if stop.is_set():
+                logger.info("callback for %s abandoned (stopped)", job["task_id"])
+                return None
             try:
                 resp = httpx.post(
                     f"{self._base_url()}/console/chat/task",
@@ -376,7 +445,9 @@ class AgentTaskCallbackPlugin:
                     "callback for %s deferred (session busy), retry %d/%d",
                     job["task_id"], attempt + 1, max_attempts,
                 )
-                time.sleep(20)
+                if stop.wait(20):
+                    logger.info("callback for %s abandoned (stopped)", job["task_id"])
+                    return None
                 continue
             logger.warning(
                 "callback post HTTP %s: %s", resp.status_code, resp.text[:200],
@@ -406,15 +477,27 @@ class AgentTaskCallbackPlugin:
 
         # Fallback mirrors the framework's two decisions: the reply is the text
         # of the LAST output item, and a failed task is reported as a failure
-        # even though the outer status is "finished" either way.
+        # even though the outer status is "finished" either way. Every step is
+        # isinstance-guarded: a malformed payload must not kill the watcher and
+        # orphan the job as pending forever.
         inner = data.get("result") or {}
-        error = (inner.get("error") or {}).get("message")
-        if inner.get("status") == "failed" and error:
-            return f"Task failed.\n\nError: {error}"[:MAX_DELIVERY_CHARS]
-        blocks = (inner.get("output") or [{}])[-1]
+        if not isinstance(inner, dict):
+            return ""
+        error = (inner.get("error") or {})
+        if not isinstance(error, dict):
+            error = {}
+        if inner.get("status") == "failed" and error.get("message"):
+            return f"Task failed.\n\nError: {error['message']}"[:MAX_DELIVERY_CHARS]
+        output = inner.get("output")
+        blocks = output[-1] if isinstance(output, list) and output else {}
+        if not isinstance(blocks, dict):
+            blocks = {}
+        content = blocks.get("content")
+        if not isinstance(content, list):
+            content = []
         text = "\n".join(
             item.get("text", "")
-            for item in (blocks.get("content") or [])
+            for item in content
             if isinstance(item, dict) and item.get("type") == "text"
         ).strip()
         return text[:MAX_DELIVERY_CHARS]
@@ -430,6 +513,18 @@ class AgentTaskCallbackPlugin:
             if current is None or current.get("status") == "cancelled":
                 logger.info("watcher for %s stopped (cancelled/missing)", task_id)
                 return
+            if time.time() - current.get("registered_at", 0) > MAX_JOB_AGE:
+                logger.warning("task %s still non-terminal after %dh; dropping "
+                               "watcher", task_id, MAX_JOB_AGE // 3600)
+                self._update_job(
+                    task_id,
+                    expected_job=job,
+                    status="abandoned",
+                    completed_at=time.time(),
+                    note=f"still non-terminal after {MAX_JOB_AGE // 3600}h; "
+                         "the task record belongs to a dead process",
+                )
+                return
             try:
                 data = self._check_task_sync(job)
             except Exception as exc:  # noqa: BLE001 - keep watcher alive
@@ -438,6 +533,7 @@ class AgentTaskCallbackPlugin:
                                    task_id)
                     self._update_job(
                         task_id,
+                        expected_job=job,
                         status="lost",
                         completed_at=time.time(),
                         note="HTTP 404 from the task endpoint: record not "
@@ -452,6 +548,7 @@ class AgentTaskCallbackPlugin:
                         " (last error: %s)", task_id, strikes, exc)
                     self._update_job(
                         task_id,
+                        expected_job=job,
                         status="abandoned",
                         completed_at=time.time(),
                         note=f"gave up after {strikes} failed checks; "
@@ -469,24 +566,59 @@ class AgentTaskCallbackPlugin:
         if result is None:
             return
 
-        status = result.get("status", "unknown")
-        text = self._delivery_text(task_id, result)
-        if not text:
-            text = f"(agent task {task_id} {status}, no text content)"
+        # A cancel or shutdown can land between the last poll and now; the
+        # delivery below must not fire for a watcher that was already stopped.
+        if stop.is_set():
+            logger.info("watcher for %s stopped before delivery", task_id)
+            return
+        current = self._get_job(task_id)
+        if current is None or current.get("status") == "cancelled":
+            logger.info("watcher for %s cancelled before delivery", task_id)
+            return
 
-        sent = self._post_reply_sync(job, text)
-        if sent:
-            self._update_job(task_id, status="done", completed_at=time.time(), final=text[:2000])
-            logger.info("callback delivered for %s", task_id)
-        else:
+        try:
+            status = result.get("status", "unknown")
+            text = self._delivery_text(task_id, result)
+            if not text:
+                text = f"(agent task {task_id} {status}, no text content)"
+        except Exception as exc:  # a rendering bug must not orphan the job
+            # as pending and re-arm it on every restart
+            logger.exception("rendering callback for %s failed", task_id)
             self._update_job(
                 task_id,
-                status="unconfirmed",
+                expected_job=job,
+                status="error",
                 completed_at=time.time(),
-                final=text[:2000],
-                note="POST outcome unknown; not auto-retried to avoid duplicate turns",
+                note=f"delivery render failed: {exc}",
             )
-            logger.warning("callback delivery unconfirmed for %s", task_id)
+            return
+
+        sent = self._post_reply_sync(job, text, stop)
+        if sent is None:
+            # Interrupted (shutdown or cancel) before any delivery happened:
+            # leave the record alone — a cancel already rewrote it, and a
+            # pending record can still be re-armed at the next boot.
+            logger.info("delivery for %s interrupted; record untouched", task_id)
+            return
+        fields: dict[str, Any] = {
+            "expected_job": job,
+            "completed_at": time.time(),
+            "final": text[:2000],
+        }
+        if sent:
+            fields["status"] = "done"
+        else:
+            fields["status"] = "unconfirmed"
+            fields["note"] = ("POST outcome unknown; not auto-retried to "
+                              "avoid duplicate turns")
+        if self._update_job(task_id, **fields):
+            if sent:
+                logger.info("callback delivered for %s", task_id)
+            else:
+                logger.warning("callback delivery unconfirmed for %s", task_id)
+        else:
+            logger.info("watcher for %s superseded before the final write; "
+                        "leaving the newer record alone", task_id)
 
     # ---- tools ----------------------------------------------------------
     def watch_agent_task(self, task_id: str, target_agent: str = "") -> str:
@@ -527,11 +659,36 @@ class AgentTaskCallbackPlugin:
             "registered_at": time.time(),
             "status": "pending",
         }
-        state = _load_state()
-        state["jobs"] = [j for j in state.get("jobs", []) if j.get("task_id") != task_id]
-        state["jobs"].append(job)
-        _save_state(state)
-        self._spawn(job)
+        with _STATE_LOCK:
+            state = _load_state()
+            old = next(
+                (j for j in state.get("jobs", []) if j.get("task_id") == task_id),
+                None,
+            )
+            if old is not None:
+                if old.get("status") in ("done", "unconfirmed"):
+                    # The result already went out (or tried to); the task
+                    # record can never produce a new one, so re-watching
+                    # would only re-inject the old result.
+                    return (
+                        f"Task {task_id} already has a terminal callback "
+                        f"record ({old.get('status')}); not re-watching."
+                    )
+                if old.get("status") == "pending":
+                    # Same registration again: keep the job_id the live
+                    # watcher holds, or its guarded terminal write would be
+                    # rejected and the record stuck at pending.
+                    keys = ("session_id", "user_id", "channel",
+                            "agent_id", "target_agent")
+                    if all(old.get(k) == job.get(k) for k in keys):
+                        job["job_id"] = old.get("job_id") or job["job_id"]
+            state["jobs"] = [j for j in state.get("jobs", []) if j.get("task_id") != task_id]
+            state["jobs"].append(job)
+            _save_state(state)
+            # Inside the lock: the state record and the live watcher must be
+            # swapped atomically, or two concurrent registrations of one task
+            # can leave the record owned by a watcher that was just stopped.
+            self._spawn(job)
         return (
             f"Watching task {task_id} for agent '{agent_id}'. "
             f"Result will be posted back to session {session_id} on completion."
@@ -558,7 +715,7 @@ class AgentTaskCallbackPlugin:
             return f"No callback job found for task {task_id}."
         if job.get("status") == "done":
             return f"Task {task_id} already delivered; nothing to cancel."
-        self._update_job(task_id, status="cancelled")
+        self._update_job(task_id, status="cancelled", completed_at=time.time())
         watcher = self._watchers.pop(task_id, None)
         if watcher is not None:
             watcher.stop()

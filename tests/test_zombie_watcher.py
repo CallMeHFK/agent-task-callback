@@ -6,12 +6,15 @@ Run: python3 tests/test_zombie_watcher.py   # or `uv run python -m pytest -q`
 import asyncio
 import builtins
 import importlib.util
+import json
 import sys
+import tempfile
 import threading
 import time
 import types
 import unittest
 from pathlib import Path
+from typing import ClassVar
 
 import httpx
 
@@ -63,11 +66,11 @@ class Base(unittest.TestCase):
 
         def _update_job(task_id, **fields):
             self.updates.append(fields)
-            return {}
+            return True
 
         self.plug._update_job = staticmethod(_update_job)
         self.plug._get_job = lambda tid: dict(self.job)
-        self.plug._post_reply_sync = lambda job, text: True
+        self.plug._post_reply_sync = lambda job, text, stop: True
 
 
 class TestGone404(Base):
@@ -131,6 +134,195 @@ class TestGone404(Base):
         self.assertEqual(seen["n"], 2)
 
 
+class TestCheckTaskContentType(Base):
+    """The content-type guard must run before raise_for_status: a wrong base
+    URL can answer 404 with an HTML page, and reading that as "task record
+    gone" parks the job as lost instead of flagging the misconfiguration."""
+
+    def _check_with(self, resp):
+        self.plug._base_url = lambda: "http://x/api"
+        saved = atc.httpx.get
+        atc.httpx.get = lambda url, headers=None, timeout=None: resp
+        try:
+            return self.plug._check_task_sync(self.job)
+        finally:
+            atc.httpx.get = saved
+
+    def test_json_404_is_gone(self):
+        req = httpx.Request("GET", "http://x/api/console/chat/task/t1")
+        resp = httpx.Response(404, request=req, json={"detail": "nope"})
+        with self.assertRaises(httpx.HTTPStatusError):
+            self._check_with(resp)
+
+    def test_html_404_is_a_wrong_url_not_a_vanished_task(self):
+        req = httpx.Request("GET", "http://x/api/console/chat/task/t1")
+        resp = httpx.Response(404, request=req,
+                              headers={"content-type": "text/html"},
+                              text="<html>not found</html>")
+        with self.assertRaises(ValueError):
+            self._check_with(resp)
+
+
+class TestAgeCap(Base):
+    """MAX_JOB_AGE was only enforced at boot; a live watcher polled a
+    never-terminal task forever."""
+
+    def test_day_old_pending_job_is_abandoned_not_polled(self):
+        self.job["registered_at"] = time.time() - 2 * atc.MAX_JOB_AGE
+        polls = []
+
+        def check(job):
+            polls.append(1)
+            raise ValueError("must not reach here")
+
+        self.plug._check_task_sync = check
+        atc.POLL_SECONDS = 0
+        self.plug._watch_sync(dict(self.job), threading.Event())
+        # The strike cap also ends in "abandoned", so the status alone cannot
+        # tell the age path apart; only "never polled" can.
+        self.assertEqual(polls, [], "an expired job must never be polled")
+        self.assertEqual(self.updates[-1].get("status"), "abandoned")
+
+
+class TestCancelBeforeDelivery(Base):
+    """A cancel landing between the final poll and the POST must win."""
+
+    def test_cancel_during_final_poll_blocks_delivery(self):
+        stop = threading.Event()
+
+        def check(job):
+            stop.set()  # cancel lands while the terminal payload is in flight
+            return {"status": "finished", "result": {}}
+
+        self.plug._check_task_sync = check
+        posts = []
+        self.plug._post_reply_sync = lambda job, text, stop: posts.append(text) or True
+        self.plug._watch_sync(dict(self.job), stop)
+        self.assertEqual(posts, [], "cancel must win over a pending delivery")
+
+
+class TestRespawnOnReregister(unittest.TestCase):
+    """Re-registering a task from a different session must replace the live
+    watcher; absorbing it would deliver the result to the old session."""
+
+    JOB: ClassVar[dict] = {"task_id": "t1", "session_id": "s-old", "user_id": "u",
+                           "channel": "console", "agent_id": "a", "target_agent": None}
+
+    def _plug_with_live_watcher(self, job):
+        plug = atc.AgentTaskCallbackPlugin()
+        old = atc._WatcherThread(dict(job))
+        old.is_alive = lambda: True
+        plug._watchers[job["task_id"]] = old
+        return plug, old
+
+    def test_new_delivery_target_replaces_the_live_watcher(self):
+        plug, old = self._plug_with_live_watcher(self.JOB)
+        new_job = dict(self.JOB, session_id="s-new")
+        saved_impl = atc._IMPL
+        atc._IMPL = types.SimpleNamespace(
+            _watch_sync=lambda job, stop: stop.wait(1))
+        try:
+            plug._spawn(new_job)
+        finally:
+            atc._IMPL = saved_impl
+        self.assertTrue(old._stop_event.is_set(), "stale watcher must be stopped")
+        self.assertIsNot(plug._watchers["t1"], old)
+        self.assertIs(plug._watchers["t1"]._job, new_job)
+        plug._watchers["t1"].stop()
+        plug._watchers["t1"].join(timeout=3)
+
+    def test_same_delivery_target_is_idempotent(self):
+        plug, old = self._plug_with_live_watcher(self.JOB)
+        plug._spawn(dict(self.JOB))
+        self.assertIs(plug._watchers["t1"], old, "same target must not respawn")
+        self.assertFalse(old._stop_event.is_set())
+
+
+class TestStatePrune(unittest.TestCase):
+    """Terminal jobs were kept forever; the state file grew without bound."""
+
+    def test_old_terminal_jobs_are_pruned_on_save(self):
+        now = time.time()
+        state = {"jobs": [
+            {"task_id": "old-done", "status": "done",
+             "completed_at": now - 2 * atc.TERMINAL_JOB_KEEP},
+            {"task_id": "new-done", "status": "done", "completed_at": now},
+            {"task_id": "pending", "status": "pending", "registered_at": now},
+        ]}
+        with tempfile.TemporaryDirectory() as d:
+            saved = atc.STATE_PATH
+            atc.STATE_PATH = Path(d) / "state.json"
+            try:
+                atc._save_state(state)
+                jobs = json.loads(atc.STATE_PATH.read_text())["jobs"]
+            finally:
+                atc.STATE_PATH = saved
+        self.assertEqual([j["task_id"] for j in jobs], ["new-done", "pending"])
+
+
+class TestSupersededWrite(unittest.TestCase):
+    """A watcher's terminal write must never clobber a cancel or a
+    re-registration that landed while it was delivering."""
+
+    def _run_watch(self, store, watcher_job, post, stop=None):
+        plug = atc.AgentTaskCallbackPlugin()
+        plug._check_task_sync = lambda job: {"status": "finished", "result": {}}
+        plug._post_reply_sync = post
+        saved = atc._load_state, atc._save_state
+        atc._load_state = lambda: store
+        atc._save_state = lambda state: None  # store is mutated in place
+        try:
+            plug._watch_sync(watcher_job, stop or threading.Event())
+        finally:
+            atc._load_state, atc._save_state = saved
+        return store["jobs"][0]
+
+    def test_cancel_during_post_is_not_clobbered(self):
+        """The POST physically went out (at-least-once window), but the
+        cancel already owns the record: it must not become "done"."""
+        stored = {"task_id": "t1", "job_id": "j1", "status": "pending",
+                  "registered_at": time.time()}
+
+        def post(job, text, stop):
+            stored["status"] = "cancelled"  # cancel lands mid-delivery
+            stop.set()
+            return True
+
+        job = self._run_watch({"jobs": [stored]}, dict(stored), post)
+        self.assertEqual(job["status"], "cancelled")
+
+    def test_interrupted_delivery_leaves_the_record_pending(self):
+        """Shutdown during the 409 backoff must not write a terminal status
+        for a result that was never even POSTed."""
+        stored = {"task_id": "t1", "job_id": "j1", "status": "pending",
+                  "registered_at": time.time()}
+        stop = threading.Event()
+
+        def post(job, text, stop_):
+            stop.set()  # shutdown lands mid-delivery; implicit None = stopped
+            # before any attempt
+
+        job = self._run_watch({"jobs": [stored]}, dict(stored), post, stop)
+        self.assertEqual(job["status"], "pending",
+                         "an undelivered result must stay re-armable")
+
+    def test_reregistered_job_is_not_clobbered_by_old_watcher(self):
+        stored = {"task_id": "t1", "job_id": "j2", "status": "pending",
+                  "registered_at": time.time()}
+        old_job = dict(stored, job_id="j1")
+        job = self._run_watch({"jobs": [stored]}, old_job,
+                              lambda job, text, stop: True)
+        self.assertEqual(job["status"], "pending",
+                         "the new registration owns the state record now")
+
+    def test_pending_job_accepts_the_terminal_write(self):
+        stored = {"task_id": "t1", "job_id": "j1", "status": "pending",
+                  "registered_at": time.time()}
+        job = self._run_watch({"jobs": [stored]}, dict(stored),
+                              lambda job, text, stop: True)
+        self.assertEqual(job["status"], "done")
+
+
 class TestStrikeCap(Base):
     """方案C: any permanent non-404 failure (wrong base_url -> ValueError, 401)
     used to loop forever too."""
@@ -153,7 +345,7 @@ class TestHappyPath(Base):
         self.plug._check_task_sync = lambda job: {
             "status": "submitted"}
         posts = []
-        self.plug._post_reply_sync = lambda job, text: posts.append(text) or True
+        self.plug._post_reply_sync = lambda job, text, stop: posts.append(text) or True
 
         calls = {"n": 0}
 
@@ -177,7 +369,7 @@ class TestDeliveryText(Base):
 
     def _deliver(self, payload):
         posts = []
-        self.plug._post_reply_sync = lambda job, text: posts.append(text) or True
+        self.plug._post_reply_sync = lambda job, text, stop: posts.append(text) or True
         self.plug._check_task_sync = lambda job: payload
         atc.POLL_SECONDS = 0
         self.plug._watch_sync(dict(self.job), threading.Event())
@@ -261,12 +453,13 @@ class TestBootRearm(unittest.TestCase):
         plug = atc.AgentTaskCallbackPlugin()
         spawned = []
         plug._spawn = lambda job: spawned.append(job["task_id"])
-        original = atc._load_state
+        original = atc._load_state, atc._save_state
         atc._load_state = lambda: {"jobs": jobs}
+        atc._save_state = lambda state: None  # keep the real state file untouched
         try:
             asyncio.run(plug._boot())
         finally:
-            atc._load_state = original
+            atc._load_state, atc._save_state = original
         return spawned
 
     def test_unconfirmed_is_not_rearmed(self):
@@ -360,6 +553,54 @@ class TestTargetAgentIdentity(Base):
         _, job = self._register("t1")
         self.assertIsNone(job["target_agent"])
         self.assertEqual(self.plug._query_headers(job)["X-Agent-Id"], "default")
+
+
+class TestReregister(unittest.TestCase):
+    """Re-registration must keep the state record compatible with whoever
+    owns the live watcher, and must never re-watch a delivered task."""
+
+    def setUp(self):
+        self.store = {"jobs": []}
+        self.plug = atc.AgentTaskCallbackPlugin()
+        self.plug._spawn = lambda job: None
+        self.saved = (atc._IMPL, atc._load_state, atc._save_state)
+        atc._IMPL = self.plug
+        atc._load_state = lambda: self.store
+        atc._save_state = lambda state: self.store.update(state)
+        self.fake = _FakeAgentContext()
+        self.fake.install()
+
+    def tearDown(self):
+        self.fake.uninstall()
+        atc._IMPL, atc._load_state, atc._save_state = self.saved
+
+    def test_same_identity_keeps_the_live_watchers_job_id(self):
+        atc.watch_agent_task("t1")
+        first_id = self.store["jobs"][0]["job_id"]
+        atc.watch_agent_task("t1")
+        self.assertEqual(len(self.store["jobs"]), 1)
+        self.assertEqual(self.store["jobs"][0]["job_id"], first_id,
+                         "the running watcher's guarded write must still fit")
+
+    def test_new_session_gets_a_fresh_job_id(self):
+        atc.watch_agent_task("t1")
+        first_id = self.store["jobs"][0]["job_id"]
+        ctx = sys.modules["qwenpaw.app.agent_context"]
+        ctx.get_current_session_id = lambda: "s-other"
+        atc.watch_agent_task("t1")
+        self.assertEqual(len(self.store["jobs"]), 1)
+        self.assertNotEqual(self.store["jobs"][0]["job_id"], first_id)
+        self.assertEqual(self.store["jobs"][0]["session_id"], "s-other")
+
+    def test_delivered_task_is_not_rewatched(self):
+        self.store["jobs"].append({
+            "task_id": "t1", "job_id": "j0", "status": "done",
+            "registered_at": time.time(), "completed_at": time.time(),
+        })
+        out = atc.watch_agent_task("t1")
+        self.assertIn("not re-watching", out)
+        self.assertEqual(self.store["jobs"][0]["job_id"], "j0",
+                         "the terminal record must be left alone")
 
 
 if __name__ == "__main__":
