@@ -1,7 +1,7 @@
 {
   "id": "agent-task-callback",
   "name": "Agent Task Callback",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Opt-in persistent watcher for inter-agent background tasks; resumes the registering console session on completion.",
   "author": "Local workspace",
   "type": "tool",
