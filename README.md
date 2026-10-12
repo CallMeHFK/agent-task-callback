@@ -246,7 +246,7 @@ install; QwenPaw imports that file by path from `~/.qwenpaw/plugins/`.
 
 ```bash
 uv sync
-uv run python -m pytest -q          # 13 tests
+uv run python -m pytest -q          # 30 tests
 uv run ruff check .
 python3 packaging/build_plugin_zip.py && unzip -l dist/*.zip
 ```

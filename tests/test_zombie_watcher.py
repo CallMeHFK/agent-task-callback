@@ -59,6 +59,10 @@ def http_status_error(code, detail="boom"):
 
 class Base(unittest.TestCase):
     def setUp(self):
+        # POLL_SECONDS is a module global that several tests zero out to keep
+        # the watch loop fast; restore it so that mutation cannot leak into
+        # tests that run afterwards.
+        self.addCleanup(setattr, atc, "POLL_SECONDS", atc.POLL_SECONDS)
         self.plug = atc.AgentTaskCallbackPlugin()
         self.updates = []
         self.calls = []

@@ -36,7 +36,7 @@ mode it resolved to:
 
 ```bash
 uv sync
-uv run python -m pytest -q             # 13 tests
+uv run python -m pytest -q             # 30 tests
 uv run ruff check .
 python3 tests/test_zombie_watcher.py   # same suite, and prints the host mode
 ```

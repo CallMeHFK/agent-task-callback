@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import uuid
@@ -342,7 +343,6 @@ class AgentTaskCallbackPlugin:
         the required /api suffix. A nonempty framework result wins,
         including a default supplied by the framework itself.
         """
-        import os
 
         def normalize(base: str) -> str:
             base = base.strip().rstrip("/")
@@ -367,8 +367,6 @@ class AgentTaskCallbackPlugin:
         return normalize(f"http://{host}:{port}")
 
     def _headers(self, agent_id: str | None = None) -> dict:
-        import os
-
         token = os.environ.get("QWENPAW_RUNTIME_INTERNAL_TOKEN", "")
         headers = {"X-Agent-Id": agent_id or "default"}
         if token:
