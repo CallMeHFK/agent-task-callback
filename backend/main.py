@@ -206,7 +206,10 @@ class AgentTaskCallbackPlugin:
                 "Context (agent/session/user/channel) is captured "
                 "automatically. Pass target_agent — the agent the task was "
                 "submitted to — so the watcher polls under that identity, the "
-                "way check_agent_task does."
+                "way check_agent_task does. Not available in ACP sessions "
+                "(T3 Code / external IDE): those workspaces are built outside "
+                "the WorkspaceRegistry, so plugin tools are never injected "
+                "there — poll check_agent_task instead."
             ),
             icon="\u23f3",
             tool_type="network",
@@ -646,6 +649,21 @@ class AgentTaskCallbackPlugin:
         if not session_id:
             return "ERROR: no active session in context; cannot register callback."
 
+        channel = get_current_channel() or "console"
+        if channel.lower().startswith("acp"):
+            # Delivery posts the result to /console/chat/task for the recorded
+            # session. ACP sessions live in a workspace the ACP server built
+            # directly, outside the console's routing, so the POST can never
+            # land — the job would watch to completion and then park as
+            # `unconfirmed`. Refuse up front instead of watching pointlessly.
+            # (In practice the tool is not even injected into ACP workspaces;
+            # this guard is for the day that changes.)
+            return (
+                "ERROR: this is an ACP session; callback delivery only "
+                "reaches console-routed sessions. Poll check_agent_task "
+                f"for task {task_id} instead (>=30s interval)."
+            )
+
         job = {
             "task_id": task_id,
             "job_id": uuid.uuid4().hex[:12],
@@ -653,7 +671,7 @@ class AgentTaskCallbackPlugin:
             "agent_id": agent_id,
             "session_id": session_id,
             "user_id": get_current_user_id(),
-            "channel": get_current_channel() or "console",
+            "channel": channel,
             "registered_at": time.time(),
             "status": "pending",
         }

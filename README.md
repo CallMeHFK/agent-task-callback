@@ -219,6 +219,15 @@ it unredacted.
 
 ## Limitations
 
+- **Not available in ACP sessions** (T3 Code and other external IDE clients).
+  The ACP server builds its workspaces directly, bypassing the
+  WorkspaceRegistry, so plugin tools are never injected there — the tool list
+  simply has no `watch_agent_task`, and that is a channel property, not the
+  agent forgetting to call it. Since 0.1.5 the tool also refuses registration
+  when the calling turn's channel is ACP, because the delivery POST targets
+  the console API and could never route back into such a session. In ACP
+  sessions, poll `check_agent_task` (≥30 s interval) instead, or register the
+  watch from a console session.
 - One watcher per task id, one delivery per watcher. When a POST's outcome is
   unknown the job parks as `unconfirmed` with the rendered answer kept in its
   `final` field, and nothing is sent again — that one reply has to be fetched by
@@ -266,6 +275,17 @@ the framework behaviours the watcher depends on.
 
 ## Changelog
 
+- **0.1.5** — ACP-channel hardening. `watch_agent_task` now refuses to register
+  from an ACP session (delivery posts to the console API, which can never route
+  back into one), telling the caller to poll `check_agent_task` instead of
+  silently watching to a dead end. Tool description documents that ACP sessions
+  (T3 Code / external IDE clients) never receive plugin tools at all, and the
+  Limitations section covers both halves of the gap. Regression tests in
+  `TestAcpChannelRefused`.
+- **0.1.4** — Closed a dozen watcher lifecycle and state races: guarded terminal
+  writes (`expected_job`), atomic record+watcher swap under the state lock,
+  idempotent re-registration keeping the live watcher's `job_id`, no re-watch of
+  delivered tasks, and stop-event checks around delivery.
 - **0.1.3** — `watch_agent_task` now accepts `target_agent`. The parameter
   existed on the internal implementation but the registered tool could not pass
   it, so every poll went out under the *registering* agent's identity while the

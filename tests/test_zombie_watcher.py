@@ -559,6 +559,48 @@ class TestTargetAgentIdentity(Base):
         self.assertEqual(self.plug._query_headers(job)["X-Agent-Id"], "default")
 
 
+class TestAcpChannelRefused(unittest.TestCase):
+    """ACP workspaces are built outside the WorkspaceRegistry, so plugin tools
+    are never injected there — and even if they were, delivery posts to the
+    console API, which cannot route back into an ACP session. Registering a
+    watcher from such a session must fail loudly instead of watching to
+    completion and parking as `unconfirmed`."""
+
+    def _register(self, channel):
+        store = {"jobs": []}
+        saved = (atc._IMPL, atc._load_state, atc._save_state)
+        atc._IMPL = atc.AgentTaskCallbackPlugin()
+        atc._IMPL._spawn = lambda job: None
+        atc._load_state = lambda: store
+        atc._save_state = lambda state: store.update(state)
+        fake = _FakeAgentContext()
+        fake.install()
+        sys.modules["qwenpaw.app.agent_context"].get_current_channel = (
+            lambda: channel
+        )
+        try:
+            out = atc.watch_agent_task("t1")
+        finally:
+            fake.uninstall()
+            atc._IMPL, atc._load_state, atc._save_state = saved
+        return out, store["jobs"]
+
+    def test_acp_registration_is_refused(self):
+        out, jobs = self._register("acp")
+        self.assertTrue(out.startswith("ERROR"), out)
+        self.assertIn("check_agent_task", out)
+        self.assertEqual(jobs, [], "a refused registration must not write a job")
+
+    def test_acp_prefixed_variant_is_refused(self):
+        out, _ = self._register("acp_bb1fa902")
+        self.assertTrue(out.startswith("ERROR"), out)
+
+    def test_console_registration_still_works(self):
+        out, jobs = self._register("console")
+        self.assertTrue(out.startswith("Watching task t1"), out)
+        self.assertEqual(len(jobs), 1)
+
+
 class TestReregister(unittest.TestCase):
     """Re-registration must keep the state record compatible with whoever
     owns the live watcher, and must never re-watch a delivered task."""
