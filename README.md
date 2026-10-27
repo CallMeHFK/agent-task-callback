@@ -183,6 +183,20 @@ output into the parent session and hid failures.
 | `abandoned` | 90 consecutive failed checks (~30 min of an unreachable or wrong API base URL) | no |
 | `cancelled` | `cancel_task_callback` | no |
 
+### Why the mode reports itself inactive
+
+The plugin registers an `AgentTaskCallbackMode` whose only job is to publish the
+three tools into the workspace `ToolRegistry` from `setup()`: it contributes no
+slash commands, hooks, prompt sections or middlewares. QwenPaw's
+`find_active_explicit_mode()` (`qwenpaw/modes/base.py`) treats *any* registered
+plugin mode that reports `is_active() == True` as an exclusive loop mode — only
+`default`, `custom-loop-control` and `coding` are exempt — so reporting active
+made `/advisor`, `/goal`, `/mission` and every custom loop refuse to start with
+`End the active agent-task-callback mode before starting …`. The mode now reports
+inactive. Nothing is lost: `register_tool` is called without `requires_modes`,
+and `runtime/tool_registry.py` filters on that declaration, not on the mode's own
+`is_active()`, so the tools stay available either way.
+
 Two failure modes are deliberate stops rather than retries. The framework keeps
 background tasks in a module-level dict that is never pruned, so a 404 means the
 record died with an older process — polling it again only fills the log (this is
@@ -255,7 +269,7 @@ install; QwenPaw imports that file by path from `~/.qwenpaw/plugins/`.
 
 ```bash
 uv sync
-uv run python -m pytest -q          # 30 tests
+uv run python -m pytest -q          # 36 tests
 uv run ruff check .
 python3 packaging/build_plugin_zip.py && unzip -l dist/*.zip
 ```
@@ -275,6 +289,14 @@ the framework behaviours the watcher depends on.
 
 ## Changelog
 
+- **0.1.6** — Stop locking out every loop mode. `AgentTaskCallbackMode.is_active()`
+  returned `True` unconditionally, and QwenPaw treats any non-whitelisted plugin
+  mode that reports active as an exclusive loop mode, so `/advisor`, `/goal`,
+  `/mission` and custom loop switches all refused to start with
+  `End the active agent-task-callback mode before starting …`. The mode exists
+  only to publish the tools from `setup()` and now reports inactive; the tools
+  declare no `requires_modes`, so they remain available. Regression tests in
+  `TestModeIsNotALoopMode`, plus a README section on why the mode is inert.
 - **0.1.5** — ACP-channel hardening. `watch_agent_task` now refuses to register
   from an ACP session (delivery posts to the console API, which can never route
   back into one), telling the caller to poll `check_agent_task` instead of

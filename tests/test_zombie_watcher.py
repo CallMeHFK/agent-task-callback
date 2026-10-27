@@ -649,6 +649,52 @@ class TestReregister(unittest.TestCase):
                          "the terminal record must be left alone")
 
 
+class TestModeIsNotALoopMode(unittest.TestCase):
+    """`AgentTaskCallbackMode` only publishes tools in `setup()`; it contributes
+    no commands, hooks or prompt sections. QwenPaw's `find_active_explicit_mode`
+    treats any non-whitelisted plugin mode that reports active as an *exclusive*
+    loop mode, so an always-True `is_active()` locked out `/advisor`, `/goal` and
+    `/mission` in every session with this plugin installed. The tools survive the
+    change because `register_tool` is called without `requires_modes` — that
+    declaration, not the mode's own `is_active()`, is what the registry filters
+    on."""
+
+    def test_is_active_returns_false(self):
+        self.assertIs(atc.AgentTaskCallbackMode().is_active(None), False)
+
+    def test_mode_contributes_no_loop_surface(self):
+        mode = atc.AgentTaskCallbackMode()
+        self.assertEqual(mode.commands(), [])
+        self.assertEqual(mode.hooks(), [])
+        self.assertEqual(mode.prompt_contributors(), [])
+
+    def test_tools_are_registered_without_requires_modes(self):
+        calls = []
+
+        class _RecordingApi:
+            def register_tool(self, **kwargs):
+                calls.append(kwargs)
+
+            def register_mode(self, mode):
+                pass
+
+            def register_startup_hook(self, **kwargs):
+                pass
+
+            def register_shutdown_hook(self, **kwargs):
+                pass
+
+        atc.AgentTaskCallbackPlugin().register(_RecordingApi())
+        self.assertEqual(
+            [c["tool_name"] for c in calls],
+            ["watch_agent_task", "callback_task_status", "cancel_task_callback"])
+        for kwargs in calls:
+            self.assertNotIn(
+                "requires_modes", kwargs,
+                "a requires_modes declaration would let the registry filter the "
+                "tool out now that the mode reports inactive")
+
+
 if __name__ == "__main__":
     print("QwenPaw host:", "stubbed (delivery-text fallback)" if HOST_STUBBED
           else "real (delivery-text uses format_background_status_text)")

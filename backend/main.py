@@ -117,7 +117,7 @@ def cancel_task_callback(task_id: str) -> str:
 
 
 class AgentTaskCallbackMode:
-    """Unconditional mode that publishes this plugin's tools into the workspace ToolRegistry."""
+    """Tool-publishing mode: registers this plugin's tools into the workspace ToolRegistry."""
 
     name = "agent-task-callback"
 
@@ -149,7 +149,10 @@ class AgentTaskCallbackMode:
         return descs
 
     def is_active(self, ctx: object) -> bool:
-        return True
+        # Not a loop mode: setup() only publishes tools. Reporting active makes
+        # find_active_explicit_mode treat it as exclusive and blocks /advisor,
+        # /goal, /mission. Tools declare no requires_modes, so tool_registry.py:187 keeps them.
+        return False
 
     async def on_turn_start(self, ctx: object) -> None:
         """No-op: the mode only publishes tools."""
